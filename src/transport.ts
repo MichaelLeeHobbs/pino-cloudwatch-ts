@@ -184,20 +184,27 @@ async function consumeSource(
  * })
  * ```
  */
-// eslint-disable-next-line @typescript-eslint/prefer-readonly-parameter-types -- options embeds the mutable AWS SDK client config; treated as read-only here
-export default function pinoCloudWatch(options: PinoCloudWatchOptions): Transform {
-  debug('init', { logGroupName: options.logGroupName })
-  const logStreamName = resolveStreamName(options.logStreamName)
+/** Resolves the level/time/message key names and level map from the options. */
+function resolveMapping(
+  options: Pick<PinoCloudWatchOptions, 'levelKey' | 'timestampKey' | 'messageKey' | 'levelLabels'>
+): LogMapping {
   const levelKey = options.levelKey ?? 'level'
   const timeKey = options.timestampKey ?? 'time'
   const messageKey = options.messageKey ?? 'msg'
-  const mapping: LogMapping = {
+  return {
     levels: { ...DEFAULT_LEVELS, ...(options.levelLabels ?? {}) },
     levelKey,
     timeKey,
     messageKey,
     reserved: new Set([levelKey, timeKey, messageKey]),
   }
+}
+
+// eslint-disable-next-line @typescript-eslint/prefer-readonly-parameter-types -- options embeds the mutable AWS SDK client config; treated as read-only here
+export default function pinoCloudWatch(options: PinoCloudWatchOptions): Transform {
+  debug('init', { logGroupName: options.logGroupName })
+  const logStreamName = resolveStreamName(options.logStreamName)
+  const mapping = resolveMapping(options)
   const onError = options.onError ?? defaultOnError
 
   const client: RelayClient<LogItem> = new CloudWatchClient(

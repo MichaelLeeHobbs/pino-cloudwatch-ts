@@ -62,7 +62,7 @@ describe('Relay', () => {
       for (const item of items) {
         relay.submit(item)
       }
-      await setTimeout(submissionInterval * 1.1)
+      await waitUntil(() => client.submitted.length === items.length)
       expect(client.submitted).toEqual(items)
     })
 
@@ -75,7 +75,7 @@ describe('Relay', () => {
       for (const item of items) {
         relay.submit(item)
       }
-      await setTimeout(submissionInterval * 1.1)
+      await waitUntil(() => items.every(item => item.callback.mock.calls.length > 0))
       expect(items.map(item => item.callback.mock.calls.length)).toEqual(
         new Array(items.length).fill(1)
       )
@@ -101,7 +101,7 @@ describe('Relay', () => {
       expect(client.submitted.length).toBeLessThanOrEqual(batchSize)
 
       // After enough intervals, all items should be submitted
-      await setTimeout(submissionInterval * 3)
+      await waitUntil(() => client.submitted.length === totalItems)
       expect(client.submitted.length).toBe(totalItems)
     })
 
@@ -117,7 +117,7 @@ describe('Relay', () => {
       relay.on('error', errorSpy)
       relay.start()
       relay.submit(createItem())
-      await setTimeout(submissionInterval * (failures.length + 1) * 1.1)
+      await waitUntil(() => errorSpy.mock.calls.length >= failures.length)
       expect(errorSpy).toHaveBeenCalledTimes(failures.length)
     })
 
@@ -143,7 +143,7 @@ describe('Relay', () => {
       relay.on('error', errorSpy)
       relay.start()
       relay.submit(createItem())
-      await setTimeout(submissionInterval * (failures.length + 1) * 1.1)
+      await waitUntil(() => client.submitted.length === 1)
       expect(errorSpy).toHaveBeenCalledTimes(0)
       // Item should be retried and succeed on second attempt
       expect(client.submitted.length).toBe(1)
