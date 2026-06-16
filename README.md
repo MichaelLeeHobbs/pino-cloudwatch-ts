@@ -1,99 +1,211 @@
-# pino-cloudwatch
+# @ubercode/pino-cloudwatch
 
-#### Send pino logs to AWS CloudWatch Logs.
+[![npm version](https://img.shields.io/npm/v/@ubercode/pino-cloudwatch.svg)](https://www.npmjs.com/package/@ubercode/pino-cloudwatch)
+[![CI](https://github.com/MichaelLeeHobbs/pino-cloudwatch-ts/actions/workflows/ci.yml/badge.svg)](https://github.com/MichaelLeeHobbs/pino-cloudwatch-ts/actions/workflows/ci.yml)
+[![TypeScript](https://img.shields.io/badge/TypeScript-6.x-blue.svg)](https://www.typescriptlang.org/)
+[![Node.js](https://img.shields.io/badge/Node.js-%3E%3D20.9.0-green.svg)](https://nodejs.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
-## About
+A modern TypeScript [pino](https://getpino.io/) **v7+ transport** for [Amazon CloudWatch Logs](https://aws.amazon.com/cloudwatch/), built on AWS SDK v3.
 
-`pino-cloudwatch` is a simple [pino](https://getpino.io/#/) transport that buffers and holds [pino](https://getpino.io/#/) logs until one of the following conditions are met:
-  * the number of logs reaches 10,000
-  * the 'size' of the logs reaches 1,048,576 bytes OR
-  * there is at least 1 log buffered and 1,000ms (default) has passed without another log item being buffered
-This is to minimise the number of calls to CloudWatch Logs.
+This is the actively-maintained successor to the original [`pino-cloudwatch`](https://github.com/dbhowell/pino-cloudwatch), rebuilt from the ground up in TypeScript. It replaces the legacy stdin-pipe CLI (AWS SDK v2, sequence-token protocol) with a worker-thread [`pino-abstract-transport`](https://github.com/pinojs/pino-abstract-transport), and inherits the mission-critical batching/throttling/bounded-memory core from its sibling [`@ubercode/winston-cloudwatch`](https://www.npmjs.com/package/@ubercode/winston-cloudwatch).
 
-The log group name is specified via the CLI (`--prefix`) and the log stream name is built based on the following information:
-  * An optional `prefix`,
-  * the hostname (via `os.hostname()`),
-  * the process ID (via `process.id`),
-  * the epoch when the first log are sent to CloudWatch Logs
+> **Project status.** The original `pino-cloudwatch` is unmaintained — no releases or
+> issue activity in years. `@ubercode/pino-cloudwatch` is its de-facto continuation:
+> every open upstream issue and PR has been triaged and addressed (see
+> [`docs/upstream-issue-audit.md`](docs/upstream-issue-audit.md)), and bug reports and
+> feature requests are tracked **in this repository** going forward.
+
+## Features
+
+- **pino v7+ transport** — runs in pino's worker thread; only records emitted through pino are shipped (your `console.log` is never captured)
+- **AWS SDK v3** — modular, tree-shakeable; no sequence-token handshake
+- **Bounded memory** — a CloudWatch outage can never stall pino or leak memory; the queue is strictly bounded (oldest-dropped)
+- **Resilient delivery** — rate-limited batches, exponential-backoff retry, and head-of-line drop so a persistent outage never wedges the pipeline
+- **Byte-aware batching** — respects the 1 MB `PutLogEvents` payload limit
+- **Graceful flush** — drains queued logs on shutdown via the transport `close` hook
+- **Flexible formatting** — default `[LEVEL] message {meta}`, optional `jsonMessage`, or fully custom
+- **Dynamic stream names** — `{hostname}`/`{pid}`/`{date}`/`{time}` tokens
+- **100% test coverage** with Jest, plus a sustained memory soak
+
+## Installation
+
+```bash
+npm install @ubercode/pino-cloudwatch pino
+# or: pnpm add @ubercode/pino-cloudwatch pino
+```
 
 ## Usage
-```
-# ./bin/pino-cloudwatch.js
-Sends pino logs to AWS CloudWatch Logs.
-Usage: node index.js | pino-cloudwatch [options]
 
-Options:
-  --help                   Show help                                   [boolean]
-  --version                Show version number                         [boolean]
-  --aws_access_key_id      AWS Access Key ID
-  --aws_secret_access_key  AWS Secret Access Key
-  --aws_region             AWS Region
-  --group                  AWS CloudWatch log group name              [required]
-  --prefix                 AWS CloudWatch log stream name prefix
-  --stream                 AWS CloudWatch log stream name, overrides --prefix option.
-  --interval               The maxmimum interval (in ms) before flushing the log
-                           queue.                                [default: 1000]
-```
-## Options
+### Recommended: worker-thread transport
 
-### `group`: `String` (required)
+```typescript
+import pino from 'pino'
 
-### `prefix`: `String`
+const logger = pino({
+  transport: {
+    target: '@ubercode/pino-cloudwatch',
+    options: {
+      logGroupName: '/my-app/logs', // REQUIRED
+      logStreamName: 'production',   // optional; defaults to "<hostname>-<pid>"
+      createLogGroup: true,
+      createLogStream: true,
+      awsConfig: { region: 'us-east-1' },
+    },
+  },
+})
 
-### `interval`: `Integer` (default `1000`ms, `0` to disable)
-
-The `interval` is the amount of time in ms that must elapse before attempting to send logs to CloudWatch Logs. Increase this to reduce the number of calls to CloudWatch Logs.
-
-If you set this to `0` then it will only send logs when:
-  * It reaches the maxiumum number of logs
-  * It reaches the maximum size of the logs
-
-__note__: Disabling the interval could mean that logs will *never* be sent to CloudWatch Logs.
-
-### `aws_access_key_id`: `String`
-
-### `aws_secret_access_key`: `String`
-
-### `aws_region`: `String`
-
-## Other uses
-
-### Writable Stream
-
-This module can be required and used as a writable stream:
-```javascript
-var pump = require('pump');
-var split = require('split2');
-var pinoCloudWatch = require('pino-cloudwatch');
-
-pump(process.stdin, split(), pinoCloudWatch({ group: 'test' }));
-
+logger.info({ userId: 123, action: 'login' }, 'Hello CloudWatch!')
 ```
 
-#### Writeable Stream Events
+Because pino runs the transport in a **worker thread**, the `options` object is
+structured-cloned across the thread boundary, so it must be **JSON-serializable**.
+Functions (`formatLog`, `formatLogItem`, a credential-provider function) and a
+pre-built `cloudWatchLogs` client **cannot** be passed this way — use the
+in-process form below for those.
 
-Since pino-cloudwatch returns a writable stream, you can attach event handlers like any other writeable stream (see https://nodejs.org/dist/v10.19.0/docs/api/stream.html#stream_writable_streams).
+### Advanced: in-process (supports functions & custom clients)
 
-In addition, a `flushed` event is emitted once the logs are successfully pushed / saved in AWS CloudWatch Logs.
+pino accepts a destination stream as its second argument. This runs the
+transport in the main thread, so callbacks and a bring-your-own client work:
 
-```javascript
-var pump = require('pump');
-var split = require('split2');
-var pinoCloudWatch = require('pino-cloudwatch');
-var streamToCloudWatch = pinoCloudWatch({ group: 'test' });
+```typescript
+import pino from 'pino'
+import pinoCloudWatch from '@ubercode/pino-cloudwatch'
 
-streamToCloudWatch.on('flushed', function () {
-  console.log('Logs were successfully sent to AWS CloudWatch');
-});
+const stream = pinoCloudWatch({
+  logGroupName: '/my-app/logs',
+  logStreamName: 'production',
+  formatLog: item => `[${item.level}] ${item.message}`,
+  awsConfig: { region: 'us-east-1', credentials: myCredentialProvider },
+})
 
-pump(process.stdin, split(), pinoCloudWatch({ group: 'test' }));
+const logger = pino({ level: 'info' }, stream)
 ```
 
-### Arbitrary logs
+## Configuration Options
 
-Technically `pino-cloudwatch` can send any object mode stream to CloudWatch Logs. This includes *any* text-based log file. For example: tailing a standard log file like nginx access.log.
+| Option               | Type                         | Required | Default        | Description                                                                                  |
+|----------------------|------------------------------|----------|----------------|----------------------------------------------------------------------------------------------|
+| `logGroupName`       | `string`                     | Yes      | –              | CloudWatch log group name (1–512 chars)                                                      |
+| `logStreamName`      | `string`                     | No       | `<hostname>-<pid>` | Log stream name (1–512 chars). Supports `{hostname}` `{pid}` `{date}` `{time}` tokens     |
+| `awsConfig`          | `CloudWatchLogsClientConfig` | No       | `{}`           | AWS SDK v3 client config (`region`, `endpoint`, `credentials`, …). Ignored if `cloudWatchLogs` is set |
+| `cloudWatchLogs`     | `CloudWatchLogsClient`       | No       | –              | Pre-built AWS SDK client (in-process usage only). Not destroyed on close                     |
+| `createLogGroup`     | `boolean`                    | No       | `false`        | Auto-create the log group on first submission                                                |
+| `createLogStream`    | `boolean`                    | No       | `false`        | Auto-create the log stream on first submission                                               |
+| `retentionInDays`    | `RetentionInDays`            | No       | –              | Set the log-group retention policy (e.g. `7`, `30`, `365`)                                   |
+| `timeout`            | `number`                     | No       | `10000`        | Timeout (ms) for each AWS SDK call                                                           |
+| `maxEventSize`       | `number`                     | No       | `1048576`      | Max event size in bytes (incl. 26-byte overhead); longer messages are truncated             |
+| `jsonMessage`        | `boolean`                    | No       | `false`        | Emit each event as a JSON object. Ignored if `formatLog`/`formatLogItem` is set              |
+| `formatLog`          | `(item) => string`           | No       | –              | Custom message formatter (in-process only). Takes precedence over `formatLogItem`            |
+| `formatLogItem`      | `(item) => {message,timestamp}` | No    | –              | Custom message+timestamp formatter (in-process only)                                         |
+| `levelLabels`        | `Record<number,string>`      | No       | pino defaults  | Override the numeric-level → label map (merged over `10..60`)                                |
+| `messageKey`         | `string`                     | No       | `'msg'`        | Record key holding the message. Set to match a custom pino `messageKey`                      |
+| `timestampKey`       | `string`                     | No       | `'time'`       | Record key holding the timestamp. Set to match a custom pino `timestamp` key                 |
+| `levelKey`           | `string`                     | No       | `'level'`      | Record key holding the level. Set to match a custom pino `levelKey`                          |
+| `onError`            | `(error) => void`            | No       | stderr warning | Delivery-failure reporter (in-process only). Default writes one line to `stderr`             |
+| `submissionInterval` | `number`                     | No       | `2000`         | Minimum ms between batch submissions                                                         |
+| `batchSize`          | `number`                     | No       | `20`           | Max log events per batch                                                                     |
+| `maxQueueSize`       | `number`                     | No       | `10000`        | Max queued events (oldest dropped when full)                                                 |
+| `maxRetries`         | `number`                     | No       | `10`           | Consecutive head-batch failures before the batch is dropped (frees head-of-line)             |
+| `retryBackoffCap`    | `number`                     | No       | `30000`        | Upper bound (ms) on exponential backoff between retries; `0` disables backoff                |
 
-## Test
+## Backpressure & Delivery Semantics
+
+CloudWatch delivery is **decoupled** from pino's log stream. Each record is
+accepted into a bounded in-memory queue and the stream keeps draining;
+delivery to CloudWatch then happens asynchronously in rate-limited batches.
+
+This is deliberate. If delivery were coupled to the inbound stream, any
+*persistent* failure (throttling, timeouts, missing IAM, a CloudWatch outage,
+or an `EMFILE`/`ulimit` storm) would stall the pipeline head-of-line and buffer
+every later log unbounded until the process ran out of memory — the failure
+mode reported upstream in
+[#36](https://github.com/dbhowell/pino-cloudwatch/issues/36) and
+[#37](https://github.com/dbhowell/pino-cloudwatch/issues/37).
+
+Practical implications:
+
+- **Memory is strictly bounded** by `maxQueueSize`, regardless of CloudWatch
+  availability. When full, the **oldest** queued event is dropped.
+- A logging call returning does **not** mean the log reached CloudWatch — only
+  that it was queued. Genuine delivery failures go to `onError` (or `stderr`).
+- During a persistent outage a failing batch is retried with exponential
+  backoff and, after `maxRetries` consecutive failures, dropped — so an
+  undeliverable head batch never blocks newer logs.
+
+## Graceful Shutdown / Flush
+
+The transport implements pino's async `close` hook: on teardown it performs a
+best-effort flush of the queue (bounded by the flush timeout) before stopping.
+With a worker transport, `await logger.flush()` and let the process end so pino
+tears the worker down cleanly; the transport drains on close.
+
+## AWS Credentials
+
+AWS SDK v3 resolves credentials from the standard chain (env vars, shared
+config files, IAM roles for EC2/ECS/Lambda). In a **worker transport** the
+chain runs inside the worker, so IAM roles and assumed-role-via-config work
+automatically. For a programmatic credential **provider** (e.g. a refreshing
+assumed-role provider — upstream
+[#35](https://github.com/dbhowell/pino-cloudwatch/issues/35)), use the
+in-process form and pass it as `awsConfig.credentials`.
+
+## Security considerations
+
+This transport accepts trusted, developer-supplied configuration and ships log
+content to AWS. A few notes for hardened/multi-tenant deployments:
+
+- **`awsConfig.endpoint` must be a trusted HTTPS URL.** It is passed straight to
+  the AWS SDK client; a value sourced from untrusted input could redirect log
+  batches to an attacker-controlled host (SSRF), and a plain `http://` endpoint
+  sends log content in clear text. Never populate it from untrusted data.
+- **The default `onError` writes the raw provider error message to `stderr`** so
+  failures aren't silent. Provider messages can include operational metadata
+  (endpoint, region, request id) — not your secret key, which the SDK never
+  echoes. On a shared host, supply your own `onError` to control this output.
+- **`DEBUG=pino-cloudwatch:*` logs option objects**, which may include
+  `awsConfig.credentials`. Enable debug logging only in trusted environments.
+- Log **message and metadata are written verbatim** (not sanitized for terminal
+  rendering); downstream viewers that interpret ANSI/newlines are the
+  consumer's responsibility.
+
+## Migration
+
+Coming from the original `pino-cloudwatch`? See
+[`docs/migration-from-pino-cloudwatch.md`](docs/migration-from-pino-cloudwatch.md).
+Every open issue and PR from the upstream project and how this rewrite
+addresses it is catalogued in
+[`docs/upstream-issue-audit.md`](docs/upstream-issue-audit.md).
+
+## Requirements
+
+- Node.js >= 20.9.0
+- pino ^8 || ^9
+
+## Development
+
+```bash
+pnpm install
+pnpm test          # format + lint + unit (100% coverage required)
+pnpm test:stress   # sustained memory soak (node --expose-gc; not in CI)
+pnpm build
 ```
-# npm test
-```
+
+This project follows the mission-critical TypeScript standard in
+[`docs/CodingStandards.md`](docs/CodingStandards.md).
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+## Maintenance & credits
+
+This package is the actively-maintained successor to the original
+`pino-cloudwatch`, which is no longer maintained. File bug reports and feature
+requests against [this repository](https://github.com/MichaelLeeHobbs/pino-cloudwatch-ts/issues).
+
+The original `pino-cloudwatch` by [David Howell](https://github.com/dbhowell) is
+gratefully acknowledged — its design informed this work. TypeScript v7-transport
+rewrite, AWS SDK v3 migration, and ongoing maintenance by
+[Michael Lee Hobbs](https://github.com/MichaelLeeHobbs).
