@@ -37,6 +37,11 @@ interface FormattedEvent {
   readonly timestamp: number
 }
 
+/** A formatted event still linked to its source item, for delivery dedup. */
+interface DeliverableEvent extends FormattedEvent {
+  readonly item: LogItem
+}
+
 /** Options for configuring {@link CloudWatchClient}. */
 export interface CloudWatchClientOptions extends CloudWatchEventFormatterOptions {
   /** AWS SDK client configuration (credentials, region, endpoint, etc.). */
@@ -118,6 +123,12 @@ export default class CloudWatchClient {
   private readonly client: CloudWatchLogsClient
   private readonly ownsClient: boolean
   private initializing: Promise<void> | null
+  // Items already accepted by CloudWatch in a prior attempt of the current
+  // batch. The relay retries the whole batch on failure; tracking delivered
+  // items here prevents re-sending events that already succeeded when a batch
+  // split across multiple PutLogEvents calls and failed partway through.
+  private readonly delivered = new WeakSet<LogItem>()
+  private destroyed = false
 
   constructor(
     logGroupName: string,
@@ -143,8 +154,10 @@ export default class CloudWatchClient {
     this.initializing = null
   }
 
-  /** Destroys the underlying AWS SDK client if it was created internally. */
+  /** Destroys the underlying AWS SDK client if it was created internally. Idempotent. */
   destroy(): void {
+    if (this.destroyed) return
+    this.destroyed = true
     if (this.ownsClient) {
       this.client.destroy()
     }
@@ -226,17 +239,26 @@ export default class CloudWatchClient {
 
   private async putLogEvents(batch: readonly LogItem[]): Promise<void> {
     debug('putLogEvents', { batchSize: batch.length })
-    const events = batch
-      .map(item => this.formatter.formatLogItem(item))
-      .sort((a: Readonly<FormattedEvent>, b: Readonly<FormattedEvent>) => a.timestamp - b.timestamp)
+    // Drop items already accepted by a prior (partially-failed) attempt so a
+    // retry of this batch never re-sends them — see `delivered`. An empty
+    // result simply yields no sub-batches below (a retry always has ≥1 pending).
+    const pending = batch.filter(item => !this.delivered.has(item))
+    const events = pending
+      .map(item => ({ item, ...this.formatter.formatLogItem(item) }))
+      .sort(
+        (a: Readonly<DeliverableEvent>, b: Readonly<DeliverableEvent>) => a.timestamp - b.timestamp
+      )
 
     for (const subBatch of this.splitByByteLimit(events)) {
       await this.sendBatch(subBatch)
+      // Mark only AFTER the send resolves, so a throw leaves later sub-batches
+      // (and this failed one) un-delivered and eligible for retry.
+      for (const event of subBatch) this.delivered.add(event.item)
     }
   }
 
-  private *splitByByteLimit(events: readonly FormattedEvent[]): Generator<FormattedEvent[]> {
-    let current: FormattedEvent[] = []
+  private *splitByByteLimit(events: readonly DeliverableEvent[]): Generator<DeliverableEvent[]> {
+    let current: DeliverableEvent[] = []
     let currentBytes = 0
 
     for (const event of events) {
@@ -256,9 +278,8 @@ export default class CloudWatchClient {
     }
   }
 
-  // PutLogEventsCommand expects a mutable InputLogEvent[], so we accept a mutable array here
-  // eslint-disable-next-line @typescript-eslint/prefer-readonly-parameter-types
-  private async sendBatch(logEvents: FormattedEvent[]): Promise<void> {
+  private async sendBatch(events: readonly DeliverableEvent[]): Promise<void> {
+    const logEvents = events.map(event => ({ message: event.message, timestamp: event.timestamp }))
     const params = {
       logGroupName: this.logGroupName,
       logStreamName: this.logStreamName,

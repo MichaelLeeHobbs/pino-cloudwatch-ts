@@ -119,16 +119,18 @@ export default class CloudWatchEventFormatter {
   /**
    * Default message formatter.
    *
-   * Format: `[LEVEL] message {metadata}`. Messages exceeding
-   * `maxEventSize - EVENT_OVERHEAD_BYTES` bytes are truncated with
-   * a `...[truncated]` suffix.
+   * Format: `[LEVEL] message {metadata}` with metadata as compact JSON (no
+   * indentation — smaller payloads against the 1 MB limit, cheaper ingestion,
+   * and reliable single-line parsing in CloudWatch Logs Insights). Messages
+   * exceeding `maxEventSize - EVENT_OVERHEAD_BYTES` bytes are truncated with a
+   * `...[truncated]` suffix.
    */
   private defaultFormatLog(item: LogItem): string {
     const level = item.level.toUpperCase()
     const message = item.message
     const meta = item.meta
     const metaString =
-      meta != null && Object.keys(meta).length > 0 ? ` ${JSON.stringify(meta, null, 2)}` : ''
+      meta != null && Object.keys(meta).length > 0 ? ` ${JSON.stringify(meta)}` : ''
     return this.truncateMessage(`[${level}] ${message}${metaString}`)
   }
 

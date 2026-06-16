@@ -173,6 +173,23 @@ describe('transport — event ordering', () => {
   })
 })
 
+describe('transport — custom pino key names', () => {
+  it('honors messageKey/timestampKey/levelKey (no silent data loss)', async () => {
+    const stream = createTransport({ messageKey: 'message', timestampKey: '@t', levelKey: 'lvl' })
+    writeLog(stream, { lvl: 50, '@t': 12345, message: 'custom keys', other: 1 })
+
+    await waitUntil(() => allEvents().length > 0)
+    const event = allEvents()[0]!
+    expect(event.message).toContain('[ERROR] custom keys')
+    expect(event.timestamp).toBe(12345)
+    // Non-reserved fields still become metadata...
+    expect(event.message).toContain('"other":1')
+    // ...but the lifted keys are NOT duplicated into metadata.
+    expect(event.message).not.toContain('"message"')
+    expect(event.message).not.toContain('"lvl"')
+  })
+})
+
 describe('transport — non-object log lines', () => {
   it('wraps a primitive line into a data field (pino-abstract-transport contract)', async () => {
     const stream = createTransport({})
@@ -181,6 +198,6 @@ describe('transport — non-object log lines', () => {
     await waitUntil(() => messages().length > 0)
     // No level/msg → "[] "; the primitive is preserved under `data`.
     expect(messages()[0]).toContain('[] ')
-    expect(messages()[0]).toContain('"data": 42')
+    expect(messages()[0]).toContain('"data":42')
   })
 })

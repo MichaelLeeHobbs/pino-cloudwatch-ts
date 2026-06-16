@@ -166,9 +166,11 @@ describe('Relay', () => {
       relay.start()
       const item = createItem()
       relay.submit(item)
-      // Allow more than maxRetries intervals to elapse.
-      await setTimeout(submissionInterval * (maxRetries + 3) * 1.1)
-      // Dropped after exactly maxRetries failed attempts.
+      // Poll until the head batch has failed maxRetries times (robust to load /
+      // timer jitter), then let extra intervals pass to confirm it was DROPPED
+      // and no further retries fire — exactly maxRetries errors, never more.
+      await waitUntil(() => errorSpy.mock.calls.length >= maxRetries)
+      await setTimeout(submissionInterval * 3)
       expect(errorSpy).toHaveBeenCalledTimes(maxRetries)
       // Callback resolved once, WITHOUT an Error (ok=false) — never delivered.
       expect(item.callback).toHaveBeenCalledTimes(1)

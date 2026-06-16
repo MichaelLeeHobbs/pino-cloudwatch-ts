@@ -35,6 +35,22 @@ and [`docs/upstream-issue-audit.md`](docs/upstream-issue-audit.md).
   `timeout`, `maxEventSize`, and full batching/throttling tuning.
 - 100% unit-test coverage, a real-pino integration suite, and a sustained
   memory soak (`pnpm run test:stress`).
+- `messageKey` / `timestampKey` / `levelKey` options to match a non-default pino
+  field naming (prevents silent message/timestamp loss).
+
+### Fixed (pre-release, multi-agent review hardening)
+
+- **Duplicate delivery** when a >1 MB batch split across multiple `PutLogEvents`
+  calls and failed partway — accepted events are now tracked and never re-sent
+  on a retry.
+- **Backoff bypass**: an incoming log during a retry-backoff window no longer
+  re-drains the failing head batch immediately.
+- **Resurrection on teardown**: `close` now awaits the consume loop before
+  stopping, and `CloudWatchClient.destroy()` is idempotent.
+- Default metadata is now **compact JSON** (was pretty-printed) — smaller
+  payloads, cheaper ingestion, reliable Logs-Insights field discovery.
+- Deterministic anti-OOM / head-of-line and end-to-end behavioral regression
+  tests added; documented security notes and Result/branded-type ADR waivers.
 
 ### Removed
 

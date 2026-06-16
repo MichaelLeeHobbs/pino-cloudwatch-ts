@@ -100,6 +100,9 @@ const logger = pino({ level: 'info' }, stream)
 | `formatLog`          | `(item) => string`           | No       | –              | Custom message formatter (in-process only). Takes precedence over `formatLogItem`            |
 | `formatLogItem`      | `(item) => {message,timestamp}` | No    | –              | Custom message+timestamp formatter (in-process only)                                         |
 | `levelLabels`        | `Record<number,string>`      | No       | pino defaults  | Override the numeric-level → label map (merged over `10..60`)                                |
+| `messageKey`         | `string`                     | No       | `'msg'`        | Record key holding the message. Set to match a custom pino `messageKey`                      |
+| `timestampKey`       | `string`                     | No       | `'time'`       | Record key holding the timestamp. Set to match a custom pino `timestamp` key                 |
+| `levelKey`           | `string`                     | No       | `'level'`      | Record key holding the level. Set to match a custom pino `levelKey`                          |
 | `onError`            | `(error) => void`            | No       | stderr warning | Delivery-failure reporter (in-process only). Default writes one line to `stderr`             |
 | `submissionInterval` | `number`                     | No       | `2000`         | Minimum ms between batch submissions                                                         |
 | `batchSize`          | `number`                     | No       | `20`           | Max log events per batch                                                                     |
@@ -147,6 +150,25 @@ automatically. For a programmatic credential **provider** (e.g. a refreshing
 assumed-role provider — upstream
 [#35](https://github.com/dbhowell/pino-cloudwatch/issues/35)), use the
 in-process form and pass it as `awsConfig.credentials`.
+
+## Security considerations
+
+This transport accepts trusted, developer-supplied configuration and ships log
+content to AWS. A few notes for hardened/multi-tenant deployments:
+
+- **`awsConfig.endpoint` must be a trusted HTTPS URL.** It is passed straight to
+  the AWS SDK client; a value sourced from untrusted input could redirect log
+  batches to an attacker-controlled host (SSRF), and a plain `http://` endpoint
+  sends log content in clear text. Never populate it from untrusted data.
+- **The default `onError` writes the raw provider error message to `stderr`** so
+  failures aren't silent. Provider messages can include operational metadata
+  (endpoint, region, request id) — not your secret key, which the SDK never
+  echoes. On a shared host, supply your own `onError` to control this output.
+- **`DEBUG=pino-cloudwatch:*` logs option objects**, which may include
+  `awsConfig.credentials`. Enable debug logging only in trusted environments.
+- Log **message and metadata are written verbatim** (not sanitized for terminal
+  rendering); downstream viewers that interpret ANSI/newlines are the
+  consumer's responsibility.
 
 ## Migration
 

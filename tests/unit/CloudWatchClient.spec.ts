@@ -492,4 +492,50 @@ describe('CloudWatchClient', () => {
       expect(cwMock.commandCalls(PutLogEventsCommand)).toHaveLength(2)
     })
   })
+
+  describe('delivery dedup across a partially-failed split batch', () => {
+    it('does not re-deliver events that already succeeded in a prior attempt', async () => {
+      // Two ~600 KB events → > 1 MB → split into two PutLogEvents calls.
+      const big = 'x'.repeat(600_000)
+      const batch: LogItem[] = [
+        { date: 1, level: 'info', message: `A-${big}`, callback: () => undefined },
+        { date: 2, level: 'info', message: `B-${big}`, callback: () => undefined },
+      ]
+      const delivered: string[] = []
+      let call = 0
+      cwMock.on(PutLogEventsCommand).callsFake((input: { logEvents?: { message?: string }[] }) => {
+        call += 1
+        // The 2nd sub-batch (event B) fails once; everything else succeeds.
+        if (call === 2) return Promise.reject(createErrorWithCode('ThrottlingException'))
+        for (const event of input.logEvents ?? []) delivered.push((event.message ?? '').slice(0, 9))
+        return Promise.resolve({})
+      })
+      const client = new CloudWatchClient(logGroupName, logStreamName)
+
+      // Attempt 1: A delivers, B rejects → submit throws (relay would retry).
+      await expect(client.submit(batch)).rejects.toThrow()
+      // Attempt 2 (the relay retry): A must NOT be resent; only B.
+      await client.submit(batch)
+
+      // Exactly one successful delivery per event — no duplicate of A.
+      expect(delivered).toHaveLength(2)
+      expect(new Set(delivered).size).toBe(2)
+    })
+  })
+
+  describe('destroy()', () => {
+    it('is idempotent — destroys an owned client only once', () => {
+      const destroySpy = jest
+        .spyOn(CloudWatchLogsClient.prototype, 'destroy')
+        .mockImplementation(() => undefined)
+      try {
+        const client = new CloudWatchClient(logGroupName, logStreamName)
+        client.destroy()
+        client.destroy()
+        expect(destroySpy).toHaveBeenCalledTimes(1)
+      } finally {
+        destroySpy.mockRestore()
+      }
+    })
+  })
 })

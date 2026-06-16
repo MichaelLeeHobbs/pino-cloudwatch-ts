@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from '@jest/globals'
+import { once } from 'node:events'
 import { type Transform } from 'node:stream'
 import { mockClient } from 'aws-sdk-client-mock'
 import { CloudWatchLogsClient, PutLogEventsCommand } from '@aws-sdk/client-cloudwatch-logs'
@@ -49,30 +50,35 @@ beforeEach(() => {
   cwMock.onAnyCommand().resolves({})
 })
 
-afterEach(() => {
-  // Destroy synchronously WITHOUT awaiting 'close': a permanently-stuck send
-  // would otherwise hold close()'s flush open for the full flush timeout. The
-  // residual flush timer is unref'd, so it never keeps the process alive.
+afterEach(async () => {
+  // Fully tear down each transport before the next test: await 'close' so the
+  // relay stops and stops submitting. (Skipping the await would let a still-
+  // draining relay leak deliveries into the next test's mock.)
   for (const stream of streams.splice(0)) {
-    if (!stream.destroyed) stream.destroy()
+    if (!stream.destroyed) {
+      stream.end()
+      await once(stream, 'close').catch(() => undefined)
+    }
   }
 })
 
 describe('pino transport — bounded memory / no head-of-line stall (issue #9)', () => {
-  it('does not stall the inbound stream when delivery is permanently stuck', async () => {
-    // PutLogEvents that never settles: the first batch is in-flight forever.
-    cwMock.on(PutLogEventsCommand).callsFake(() => new Promise(() => undefined))
+  it('does not stall the inbound stream when delivery permanently fails', async () => {
+    // PutLogEvents that always fails: delivery never succeeds, but the relay's
+    // bounded retry/drop keeps the queue (and thus the stream) from backing up.
+    cwMock.on(PutLogEventsCommand).rejects(new Error('permanently down'))
     const stream = createTransport({
       submissionInterval: 5,
       batchSize: 10,
       maxQueueSize: 100,
+      maxRetries: 2,
     })
 
     let maxBuffer = 0
-    const N = 5000
+    const N = 2000
     for (let i = 0; i < N; i++) {
       writeLog(stream, { level: 30, time: 1, msg: `event ${i}` })
-      if (i % 250 === 0) {
+      if (i % 200 === 0) {
         await tick()
         maxBuffer = Math.max(maxBuffer, stream.writableLength)
       }

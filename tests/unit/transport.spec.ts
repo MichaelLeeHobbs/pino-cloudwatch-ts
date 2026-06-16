@@ -69,7 +69,7 @@ describe('pino-cloudwatch transport', () => {
     const messages = putEventMessages()
     expect(messages).toHaveLength(1)
     expect(messages[0]).toContain('[INFO] hello')
-    expect(messages[0]).toContain('"userId": 7')
+    expect(messages[0]).toContain('"userId":7')
   })
 
   it('maps numeric levels to labels and passes string levels through', async () => {
@@ -91,7 +91,7 @@ describe('pino-cloudwatch transport', () => {
 
     await waitUntil(() => putEventMessages().length > 0)
     expect(putEventMessages()[0]).toContain('[] ')
-    expect(putEventMessages()[0]).toContain('"foo": "bar"')
+    expect(putEventMessages()[0]).toContain('"foo":"bar"')
   })
 
   it('supports custom level-label overrides', async () => {

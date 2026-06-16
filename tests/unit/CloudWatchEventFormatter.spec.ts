@@ -33,9 +33,7 @@ describe('CloudWatchEventFormatter', () => {
       }
       const event = formatter.formatLogItem(item)
       expect(event.timestamp).toBe(date)
-      expect(event.message).toBe(`[INFO] Hello, world {
-  "foo": "bar"
-}`)
+      expect(event.message).toBe('[INFO] Hello, world {"foo":"bar"}')
     })
   })
 
@@ -56,9 +54,7 @@ describe('CloudWatchEventFormatter', () => {
         callback: noop,
       }
       const msg = formatter.formatLog(item)
-      expect(msg).toBe(`[INFO] Hello, world {
-  "foo": "bar"
-}`)
+      expect(msg).toBe('[INFO] Hello, world {"foo":"bar"}')
     })
 
     it('omits metadata when undefined', () => {

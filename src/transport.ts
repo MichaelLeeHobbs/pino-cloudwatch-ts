@@ -5,7 +5,7 @@ import { type Transform } from 'node:stream'
 import CloudWatchClient, { type CloudWatchClientOptions } from './CloudWatchClient'
 import Relay, { type RelayClient, type RelayOptions } from './Relay'
 import { type LogCallback, type LogItem } from './LogItem'
-import { isError } from './typeGuards'
+import { isError, isRecord } from './typeGuards'
 
 const debug = createDebug('pino-cloudwatch:transport')
 
@@ -34,8 +34,15 @@ const DEFAULT_LEVELS: Readonly<Record<number, string>> = {
   60: 'fatal',
 }
 
-/** Fields lifted out of the pino log object; everything else becomes metadata. */
-const RESERVED_KEYS: readonly string[] = ['level', 'time', 'msg']
+/** Resolved key names + level map used to translate a pino record into a {@link LogItem}. */
+interface LogMapping {
+  readonly levels: Readonly<Record<number, string>>
+  readonly levelKey: string
+  readonly timeKey: string
+  readonly messageKey: string
+  /** `{ levelKey, timeKey, messageKey }` as a Set, for fast metadata filtering. */
+  readonly reserved: ReadonlySet<string>
+}
 
 /** Options for the pino CloudWatch transport. */
 export interface PinoCloudWatchOptions extends Partial<RelayOptions>, CloudWatchClientOptions {
@@ -51,11 +58,21 @@ export interface PinoCloudWatchOptions extends Partial<RelayOptions>, CloudWatch
    * Invoked when a batch fails to deliver (after the relay's bounded retry).
    * Defaults to writing a one-line warning to `stderr` so failures are never
    * silent (issue #41). Supply a no-op to silence, or your own reporter.
+   *
+   * @remarks In-process only. A function cannot cross pino's worker-thread
+   * boundary, so this is ignored when the transport is loaded via
+   * `transport: { target }`; use the in-process form `pino(options, stream)`.
    */
   // eslint-disable-next-line @typescript-eslint/prefer-readonly-parameter-types -- Error is not a deeply-readonly type
   readonly onError?: (error: Error) => void
   /** Override the numeric-level → label mapping. Merged over {@link DEFAULT_LEVELS}. */
   readonly levelLabels?: Readonly<Record<number, string>>
+  /** Key the pino record stores the message under. Defaults to pino's `'msg'`. */
+  readonly messageKey?: string
+  /** Key the pino record stores the timestamp under. Defaults to pino's `'time'`. */
+  readonly timestampKey?: string
+  /** Key the pino record stores the level under. Defaults to pino's `'level'`. */
+  readonly levelKey?: string
 }
 
 /** Coerces an unknown thrown/emitted value into an `Error`. */
@@ -89,30 +106,29 @@ function defaultOnError(error: Error): void {
 }
 
 /**
- * Converts a parsed pino log object into a {@link LogItem}. `level`, `time` and
- * `msg` are lifted out; every other field becomes metadata. Missing or
- * wrong-typed fields fall back to safe defaults (Rule 7.2: validate at the
- * boundary).
+ * Converts a parsed pino log object into a {@link LogItem}. The configured
+ * level/time/message keys are lifted out; every other field becomes metadata.
+ * Missing or wrong-typed fields fall back to safe defaults (Rule 7.2: validate
+ * at the boundary).
  */
-function toLogItem(
-  record: Readonly<Record<string, unknown>>,
-  levels: Readonly<Record<number, string>>
-): LogItem {
-  const rawLevel = record.level
+function toLogItem(record: Readonly<Record<string, unknown>>, mapping: LogMapping): LogItem {
+  const rawLevel = record[mapping.levelKey]
   let level: string
   if (typeof rawLevel === 'number') {
-    level = levels[rawLevel] ?? String(rawLevel)
+    level = mapping.levels[rawLevel] ?? String(rawLevel)
   } else if (typeof rawLevel === 'string') {
     level = rawLevel
   } else {
     level = ''
   }
-  const date = typeof record.time === 'number' ? record.time : Date.now()
-  const message = typeof record.msg === 'string' ? record.msg : ''
+  const rawTime = record[mapping.timeKey]
+  const date = typeof rawTime === 'number' && Number.isFinite(rawTime) ? rawTime : Date.now()
+  const rawMessage = record[mapping.messageKey]
+  const message = typeof rawMessage === 'string' ? rawMessage : ''
 
   const meta: Record<string, unknown> = {}
   for (const key of Object.keys(record)) {
-    if (!RESERVED_KEYS.includes(key)) {
+    if (!mapping.reserved.has(key)) {
       meta[key] = record[key]
     }
   }
@@ -129,7 +145,7 @@ async function consumeSource(
   source: Transform & build.OnUnknown,
   // eslint-disable-next-line @typescript-eslint/prefer-readonly-parameter-types -- Relay is a stateful class instance
   relay: Relay<LogItem>,
-  levels: Readonly<Record<number, string>>,
+  mapping: LogMapping,
   // eslint-disable-next-line @typescript-eslint/prefer-readonly-parameter-types -- Error is not a deeply-readonly type
   onError: (error: Error) => void
 ): Promise<void> {
@@ -141,7 +157,9 @@ async function consumeSource(
     // pino-abstract-transport guarantees a non-null object here: it emits null
     // lines and parse failures via the 'unknown' event and wraps primitive
     // values into `{ data, time }` before they reach this iterator.
-    relay.submit(toLogItem(obj as Readonly<Record<string, unknown>>, levels))
+    /* istanbul ignore next -- defensive: the guarantee above means non-records never arrive */
+    if (!isRecord(obj)) continue
+    relay.submit(toLogItem(obj, mapping))
   }
 }
 
@@ -170,7 +188,16 @@ async function consumeSource(
 export default function pinoCloudWatch(options: PinoCloudWatchOptions): Transform {
   debug('init', { logGroupName: options.logGroupName })
   const logStreamName = resolveStreamName(options.logStreamName)
-  const levels = { ...DEFAULT_LEVELS, ...(options.levelLabels ?? {}) }
+  const levelKey = options.levelKey ?? 'level'
+  const timeKey = options.timestampKey ?? 'time'
+  const messageKey = options.messageKey ?? 'msg'
+  const mapping: LogMapping = {
+    levels: { ...DEFAULT_LEVELS, ...(options.levelLabels ?? {}) },
+    levelKey,
+    timeKey,
+    messageKey,
+    reserved: new Set([levelKey, timeKey, messageKey]),
+  }
   const onError = options.onError ?? defaultOnError
 
   const client: RelayClient<LogItem> = new CloudWatchClient(
@@ -183,9 +210,14 @@ export default function pinoCloudWatch(options: PinoCloudWatchOptions): Transfor
   relay.on('error', handleError)
   relay.start()
 
+  // Track the consume loop so close() can wait for it to finish before stop().
+  let consumed: Promise<void> = Promise.resolve()
   return build(
     // eslint-disable-next-line @typescript-eslint/prefer-readonly-parameter-types -- pino passes a mutable Node stream
-    (source: Transform & build.OnUnknown) => consumeSource(source, relay, levels, onError),
+    (source: Transform & build.OnUnknown): Promise<void> => {
+      consumed = consumeSource(source, relay, mapping, onError)
+      return consumed
+    },
     {
       // Called on both error and graceful shutdown (logger.flush()/final(),
       // worker teardown). Drain the queue best-effort, then release resources
@@ -194,8 +226,12 @@ export default function pinoCloudWatch(options: PinoCloudWatchOptions): Transfor
         debug('close')
         try {
           await relay.flush()
+          // Wait for the consume loop to finish (the stream is being destroyed,
+          // so it will) before stop(): a late submit() after stop() would
+          // otherwise resurrect the relay against an already-destroyed client.
+          await consumed
         } catch {
-          /* istanbul ignore next -- defensive: flush() resolves on timeout and is not expected to reject */
+          /* istanbul ignore next -- flush() resolves on timeout; the consume loop rejects only on a stream error */
         }
         relay.removeListener('error', handleError)
         relay.stop()

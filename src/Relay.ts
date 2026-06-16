@@ -132,6 +132,7 @@ export default class Relay<T extends RelayItem> extends EventEmitter {
   /** Enqueues an item for batch submission. Auto-starts the relay if not started. */
   submit(item: T): void {
     if (!this.queue) this.start()
+    // start() unconditionally assigns this.queue, so the non-null assertion is sound.
     const dropped = this.queue!.push(item)
     if (dropped) {
       // Queue is full — the oldest item was evicted. Complete its callback
@@ -188,7 +189,11 @@ export default class Relay<T extends RelayItem> extends EventEmitter {
   // After processing a batch, submitInternal() calls this again to continue
   // draining — an event-loop-mediated iteration bounded by the queue's maxSize.
   private scheduleSubmission(): void {
-    if (this.submissionPending || !this.limiter || !this.queue) return
+    // While a retry-backoff timer is pending, do NOT schedule a drain — an
+    // incoming submit() during the backoff window would otherwise re-drain the
+    // failing head batch immediately and defeat the exponential backoff. The
+    // pending retryTimer will call scheduleSubmission() itself when it fires.
+    if (this.submissionPending || this.retryTimer || !this.limiter || !this.queue) return
     this.submissionPending = true
     debug('scheduleSubmission')
     void this.limiter
