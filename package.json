@@ -1,6 +1,6 @@
 {
   "name": "@ubercode/pino-cloudwatch",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "A TypeScript pino v7+ transport for Amazon CloudWatch Logs.",
   "keywords": [
     "amazon",
