@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # Pin the floor (20.9.0 matches `engines` in package.json) so a
+        # regression that only appears on 20.9–20.12 still fails CI.
+        node-version: [20.9.0, 22, 24]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm run test:ci
+
+      - run: pnpm run build
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-node-${{ matrix.node-version }}
+          path: coverage/
